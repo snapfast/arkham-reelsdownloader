@@ -3,28 +3,15 @@ set -euo pipefail
 
 # Build script for Render.com
 # ---------------------------
-# Use this as your "Build Command" on Render.
+# Build Command:  bash render_build.sh
+# Start Command:  ./run_prod.sh
 #
-# It will:
-#   1. Install Firefox browser and open YouTube (via setup_firefox_youtube.py)
-#   2. Install Python dependencies
-#   3. Download the latest yt-dlp binary into the project directory
-#
-# Example Render configuration:
-#   Build Command:  bash render_build.sh
-#   Start Command:  uvicorn yt_dlp_fastapi:app --host 0.0.0.0 --port 8000
-
-echo "Installing Deno (JS runtime required by yt-dlp for YouTube)..."
-# Install Deno into the project directory so it persists at runtime on Render
-# (Render only preserves the project dir between build and runtime)
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-export DENO_INSTALL="$SCRIPT_DIR/.deno"
-curl -fsSL https://deno.land/install.sh | sh
-export PATH="$DENO_INSTALL/bin:$PATH"
-deno --version
-
-echo "Setting up Firefox and opening YouTube..."
-python3 setup_firefox_youtube.py || echo "Firefox setup had issues, continuing anyway..."
+# Cookie setup (one-time):
+#   1. cp ~/.mozilla/firefox/<your-profile>/cookies.sqlite .
+#   2. openssl enc -aes-256-cbc -salt -pbkdf2 -in cookies.sqlite -out cookies.sqlite.enc -pass pass:YOUR_SECRET
+#   3. Commit cookies.sqlite.enc and push
+#   4. Set COOKIES_KEY=YOUR_SECRET in Render dashboard
+#   To refresh cookies: repeat steps 1-3.
 
 echo "Installing Python dependencies..."
 pip install --upgrade pip
@@ -34,4 +21,3 @@ echo "Downloading latest yt-dlp binary..."
 python3 download_yt_dlp.py
 
 echo "Build step completed."
-
