@@ -14,6 +14,11 @@ set -euo pipefail
 #   Build Command:  bash render_build.sh
 #   Start Command:  uvicorn yt_dlp_fastapi:app --host 0.0.0.0 --port 8000
 
+echo "Installing Deno (JS runtime required by yt-dlp for YouTube)..."
+curl -fsSL https://deno.land/install.sh | sh
+export PATH="$HOME/.deno/bin:$PATH"
+deno --version
+
 echo "Setting up Firefox and opening YouTube..."
 python3 setup_firefox_youtube.py || echo "Firefox setup had issues, continuing anyway..."
 
