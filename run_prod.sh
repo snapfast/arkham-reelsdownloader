@@ -12,5 +12,5 @@ PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$PROJECT_DIR"
 
 echo "Starting FastAPI server (no virtualenv)..."
-exec uvicorn yt_dlp_fastapi:app --host 0.0.0.0 --port 8000
+exec uvicorn yt_dlp_fastapi:app --host 0.0.0.0 --port 10000
 

@@ -185,5 +185,5 @@ async def resolve(request: ResolveRequest) -> ResolveResponse:
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("yt_dlp_fastapi:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("yt_dlp_fastapi:app", host="0.0.0.0", port=10000, reload=True)
 
