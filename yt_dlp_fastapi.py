@@ -106,6 +106,55 @@ def _quality_to_format(quality: int) -> str:
     return "best[ext=mp4][height<=2160][vcodec!=none][acodec!=none]"
 
 
+def _has_firefox_cookies() -> bool:
+    """Check if a Firefox cookies database exists on this system."""
+    home = os.path.expanduser("~")
+    candidates = [
+        os.path.join(home, ".mozilla", "firefox"),
+        os.path.join(home, ".config", "mozilla", "firefox"),
+    ]
+    for base in candidates:
+        if not os.path.isdir(base):
+            continue
+        for entry in os.listdir(base):
+            cookies_db = os.path.join(base, entry, "cookies.sqlite")
+            if os.path.isfile(cookies_db):
+                return True
+    return False
+
+
+def _run_yt_dlp(cmd: list[str]) -> list[str]:
+    """Run a yt-dlp command and return extracted URLs."""
+    try:
+        output = subprocess.check_output(
+            cmd,
+            text=True,
+            stderr=subprocess.STDOUT,
+        )
+    except subprocess.CalledProcessError as e:
+        debug_cmd = " ".join(cmd)
+        print(f"[yt-dlp DEBUG] Command failed: {debug_cmd}", file=sys.stderr)
+        if e.output:
+            print("[yt-dlp DEBUG] Raw output:", file=sys.stderr)
+            print(e.output, file=sys.stderr)
+
+        error_lines = []
+        if e.output:
+            for line in e.output.splitlines():
+                line = line.strip()
+                if "skipping cookie file entry" in line.lower() or "does not look like a netscape format" in line.lower():
+                    continue
+                error_lines.append(line)
+        msg = "\n".join(error_lines).strip() if error_lines else f"yt-dlp failed with exit code {e.returncode}"
+        raise RuntimeError(msg) from e
+
+    return [
+        line.strip()
+        for line in output.splitlines()
+        if line.strip().startswith(("http://", "https://"))
+    ]
+
+
 def resolve_media_urls(
     binary_path: str,
     url: str,
@@ -115,8 +164,8 @@ def resolve_media_urls(
     Use yt-dlp with -g to resolve direct media URL(s) for the given page URL.
 
     We only select MP4 formats with both video and audio.
-    If running on Render.com, we use cookies from the installed Firefox
-    profile via yt-dlp's --cookies-from-browser firefox.
+    If running on Render.com and Firefox cookies are available, we try with
+    cookies first, then fall back to running without cookies.
     """
     cmd = [binary_path]
 
@@ -124,49 +173,24 @@ def resolve_media_urls(
         fmt = _quality_to_format(quality)
         cmd += ["-f", fmt]
     else:
-        # Default: best MP4 format that already includes both video and audio
         cmd += ["-f", "best[ext=mp4][vcodec!=none][acodec!=none]"]
 
-    # On Render.com, use cookies from Firefox (yt-dlp docs):
-    #   yt-dlp --cookies-from-browser firefox URL
-    if os.environ.get("RENDER", "").lower() == "true":
-        cmd += ["--cookies-from-browser", "firefox"]
+    use_cookies = (
+        os.environ.get("RENDER", "").lower() == "true"
+        and _has_firefox_cookies()
+    )
 
+    if use_cookies:
+        # Try with Firefox cookies first
+        cmd_with_cookies = cmd + ["--cookies-from-browser", "firefox", "-g", url]
+        try:
+            return _run_yt_dlp(cmd_with_cookies)
+        except RuntimeError:
+            print("[yt-dlp] Cookie-based attempt failed, retrying without cookies...", file=sys.stderr)
+
+    # Run without cookies (or as fallback)
     cmd += ["-g", url]
-
-    try:
-        output = subprocess.check_output(
-            cmd,
-            text=True,
-            stderr=subprocess.STDOUT,
-        )
-    except subprocess.CalledProcessError as e:
-        # Log full yt-dlp command and raw output to stderr for debugging
-        debug_cmd = " ".join(cmd)
-        print(f"[yt-dlp DEBUG] Command failed: {debug_cmd}", file=sys.stderr)
-        if e.output:
-            print("[yt-dlp DEBUG] Raw output:", file=sys.stderr)
-            print(e.output, file=sys.stderr)
-
-        # Filter out cookie-related warnings from error messages returned to client
-        error_lines = []
-        if e.output:
-            for line in e.output.splitlines():
-                line = line.strip()
-                # Skip cookie file format warnings
-                if "skipping cookie file entry" in line.lower() or "does not look like a netscape format" in line.lower():
-                    continue
-                error_lines.append(line)
-        msg = "\n".join(error_lines).strip() if error_lines else f"yt-dlp failed with exit code {e.returncode}"
-        raise RuntimeError(msg) from e
-
-    # Keep only lines that look like actual URLs, drop warnings and other text
-    urls = [
-        line.strip()
-        for line in output.splitlines()
-        if line.strip().startswith(("http://", "https://"))
-    ]
-    return urls
+    return _run_yt_dlp(cmd)
 
 
 @app.post("/resolve", response_model=ResolveResponse)
