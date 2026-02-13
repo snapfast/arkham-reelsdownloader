@@ -15,8 +15,12 @@ set -euo pipefail
 #   Start Command:  uvicorn yt_dlp_fastapi:app --host 0.0.0.0 --port 8000
 
 echo "Installing Deno (JS runtime required by yt-dlp for YouTube)..."
+# Install Deno into the project directory so it persists at runtime on Render
+# (Render only preserves the project dir between build and runtime)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export DENO_INSTALL="$SCRIPT_DIR/.deno"
 curl -fsSL https://deno.land/install.sh | sh
-export PATH="$HOME/.deno/bin:$PATH"
+export PATH="$DENO_INSTALL/bin:$PATH"
 deno --version
 
 echo "Setting up Firefox and opening YouTube..."

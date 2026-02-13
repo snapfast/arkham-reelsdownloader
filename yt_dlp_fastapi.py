@@ -28,10 +28,16 @@ from typing import List, Optional
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, HttpUrl
 
-# Ensure Deno (yt-dlp's JS runtime) is discoverable at runtime
-_deno_bin = os.path.join(os.path.expanduser("~"), ".deno", "bin")
-if os.path.isdir(_deno_bin) and _deno_bin not in os.environ.get("PATH", ""):
-    os.environ["PATH"] = _deno_bin + os.pathsep + os.environ.get("PATH", "")
+# Ensure Deno (yt-dlp's JS runtime) is discoverable at runtime.
+# Check both the project-local .deno (used on Render) and the home directory.
+_script_dir = os.path.dirname(os.path.abspath(__file__))
+for _deno_bin in [
+    os.path.join(_script_dir, ".deno", "bin"),
+    os.path.join(os.path.expanduser("~"), ".deno", "bin"),
+]:
+    if os.path.isdir(_deno_bin) and _deno_bin not in os.environ.get("PATH", ""):
+        os.environ["PATH"] = _deno_bin + os.pathsep + os.environ.get("PATH", "")
+        break
 
 YT_DLP_BINARY_NAME = "yt-dlp_linux"
 
@@ -110,6 +116,22 @@ def _quality_to_format(quality: int) -> str:
     return "best[ext=mp4][height<=2160][vcodec!=none][acodec!=none]"
 
 
+def _get_cookies_file() -> Optional[str]:
+    """Return path to a Netscape-format cookies.txt if one exists in the project."""
+    cookies_path = os.path.join(_script_dir, "cookies.txt")
+    if os.path.isfile(cookies_path) and os.path.getsize(cookies_path) > 0:
+        # Quick check: Netscape cookies files start with "# Netscape HTTP Cookie File"
+        # or "# HTTP Cookie File". Skip files that don't look like cookies.
+        try:
+            with open(cookies_path, "r") as f:
+                first_line = f.readline().strip()
+            if "cookie" in first_line.lower() or first_line.startswith("#"):
+                return cookies_path
+        except OSError:
+            pass
+    return None
+
+
 def _has_firefox_cookies() -> bool:
     """Check if a Firefox cookies database exists on this system."""
     home = os.path.expanduser("~")
@@ -179,18 +201,20 @@ def resolve_media_urls(
     else:
         cmd += ["-f", "best[ext=mp4][vcodec!=none][acodec!=none]"]
 
-    use_cookies = (
-        os.environ.get("RENDER", "").lower() == "true"
-        and _has_firefox_cookies()
-    )
-
-    if use_cookies:
-        # Try with Firefox cookies first
+    # Try cookies in order: cookies.txt file > Firefox browser > no cookies
+    cookies_file = _get_cookies_file()
+    if cookies_file:
+        cmd_with_cookies = cmd + ["--cookies", cookies_file, "-g", url]
+        try:
+            return _run_yt_dlp(cmd_with_cookies)
+        except RuntimeError:
+            print("[yt-dlp] cookies.txt attempt failed, trying without cookies...", file=sys.stderr)
+    elif os.environ.get("RENDER", "").lower() == "true" and _has_firefox_cookies():
         cmd_with_cookies = cmd + ["--cookies-from-browser", "firefox", "-g", url]
         try:
             return _run_yt_dlp(cmd_with_cookies)
         except RuntimeError:
-            print("[yt-dlp] Cookie-based attempt failed, retrying without cookies...", file=sys.stderr)
+            print("[yt-dlp] Firefox cookie attempt failed, trying without cookies...", file=sys.stderr)
 
     # Run without cookies (or as fallback)
     cmd += ["-g", url]
