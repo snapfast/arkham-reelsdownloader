@@ -120,12 +120,12 @@ def _get_cookies_file() -> Optional[str]:
     """Return path to a Netscape-format cookies.txt if one exists in the project."""
     cookies_path = os.path.join(_script_dir, "cookies.txt")
     if os.path.isfile(cookies_path) and os.path.getsize(cookies_path) > 0:
-        # Quick check: Netscape cookies files start with "# Netscape HTTP Cookie File"
-        # or "# HTTP Cookie File". Skip files that don't look like cookies.
+        # Netscape cookies files start with "# Netscape HTTP Cookie File"
+        # or "# HTTP Cookie File". Only accept files with this header.
         try:
             with open(cookies_path, "r") as f:
-                first_line = f.readline().strip()
-            if "cookie" in first_line.lower() or first_line.startswith("#"):
+                first_line = f.readline().strip().lower()
+            if "netscape" in first_line or "http cookie" in first_line:
                 return cookies_path
         except OSError:
             pass
