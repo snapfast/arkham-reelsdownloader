@@ -8,6 +8,7 @@ Called from render_build.sh during Render deployment.
 
 import os
 import platform
+import shutil
 import subprocess
 import sys
 import time
@@ -295,8 +296,81 @@ def open_youtube_and_close():
                 xvfb_process.kill()
 
 
+def print_system_info():
+    """Print OS, CPU, memory, and disk info for debugging on Render."""
+    print("=" * 50)
+    print("SYSTEM INFORMATION")
+    print("=" * 50)
+
+    # OS info
+    print(f"Platform:    {platform.platform()}")
+    print(f"System:      {platform.system()} {platform.release()}")
+    print(f"Machine:     {platform.machine()}")
+    print(f"Python:      {platform.python_version()}")
+    print(f"HOME:        {os.path.expanduser('~')}")
+    print(f"USER:        {os.environ.get('USER', 'unknown')}")
+    print(f"RENDER:      {os.environ.get('RENDER', 'not set')}")
+
+    # /etc/os-release
+    try:
+        with open("/etc/os-release", "r") as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith(("PRETTY_NAME=", "ID=", "VERSION_ID=")):
+                    print(f"  {line}")
+    except FileNotFoundError:
+        pass
+
+    # CPU info
+    try:
+        with open("/proc/cpuinfo", "r") as f:
+            cores = 0
+            model = ""
+            for line in f:
+                if line.startswith("model name") and not model:
+                    model = line.split(":", 1)[1].strip()
+                if line.startswith("processor"):
+                    cores += 1
+            print(f"CPU:         {model}")
+            print(f"CPU cores:   {cores}")
+    except FileNotFoundError:
+        print("CPU:         (could not read /proc/cpuinfo)")
+
+    # Memory info
+    try:
+        with open("/proc/meminfo", "r") as f:
+            for line in f:
+                if line.startswith(("MemTotal:", "MemAvailable:", "SwapTotal:")):
+                    print(f"  {line.strip()}")
+    except FileNotFoundError:
+        print("Memory:      (could not read /proc/meminfo)")
+
+    # Disk info
+    try:
+        total, used, free = shutil.disk_usage("/")
+        print(f"Disk /:      {total // (1024**3)} GB total, "
+              f"{used // (1024**3)} GB used, "
+              f"{free // (1024**3)} GB free")
+    except Exception:
+        pass
+
+    # Home directory disk usage
+    home = os.path.expanduser("~")
+    try:
+        total, used, free = shutil.disk_usage(home)
+        print(f"Disk ~:      {total // (1024**3)} GB total, "
+              f"{used // (1024**3)} GB used, "
+              f"{free // (1024**3)} GB free")
+    except Exception:
+        pass
+
+    print("=" * 50)
+
+
 def main():
     """Main function: detect OS, install Firefox, open YouTube, close."""
+    print_system_info()
+
     os_type = detect_os()
     print(f"Detected OS: {os_type}")
     
