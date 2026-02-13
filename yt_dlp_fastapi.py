@@ -115,6 +115,7 @@ def resolve_media_urls(
     Use yt-dlp with -g to resolve direct media URL(s) for the given page URL.
 
     We only select MP4 formats with both video and audio.
+    If a cookies.txt file exists alongside this script, it is used automatically.
     """
     cmd = [binary_path]
 
@@ -124,6 +125,12 @@ def resolve_media_urls(
     else:
         # Default: best MP4 format that already includes both video and audio
         cmd += ["-f", "best[ext=mp4][vcodec!=none][acodec!=none]"]
+
+    # Use cookies.txt automatically if present (for signed-in / bot-protected videos)
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    cookies_path = os.path.join(script_dir, "cookies.txt")
+    if os.path.isfile(cookies_path):
+        cmd += ["--cookies", cookies_path]
 
     cmd += ["-g", url]
 
