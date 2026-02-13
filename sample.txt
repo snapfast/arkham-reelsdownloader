@@ -1,0 +1,16 @@
+
+Backend
+https://arkham-reelsdownloader.onrender.com
+
+
+curl -X POST "http://127.0.0.1:8000/resolve" \
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://www.youtube.com/watch?v=2fhRNk3HywI", "quality": 720}'
+
+
+curl -X POST "https://arkham-reelsdownloader.onrender.com/resolve" \
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://www.youtube.com/watch?v=2fhRNk3HywI", "quality": 720}'
+
+
+
