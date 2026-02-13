@@ -106,6 +106,43 @@ def _quality_to_format(quality: int) -> str:
     return "best[ext=mp4][height<=2160][vcodec!=none][acodec!=none]"
 
 
+def _is_valid_cookies_file(cookies_path: str) -> bool:
+    """
+    Check if cookies.txt looks like a valid Netscape cookie format file.
+    
+    Valid Netscape cookie files typically:
+    - Start with a comment line like "# Netscape HTTP Cookie File" (optional)
+    - Contain tab-separated lines with at least 7 fields
+    - Don't contain robots.txt-like patterns (User-agent:, Disallow:, etc.)
+    """
+    if not os.path.isfile(cookies_path):
+        return False
+    
+    try:
+        with open(cookies_path, "r", encoding="utf-8", errors="ignore") as f:
+            first_lines = [f.readline().strip() for _ in range(5)]
+            
+        # Check for robots.txt patterns
+        content = "\n".join(first_lines).lower()
+        if any(pattern in content for pattern in ["user-agent:", "disallow:", "sitemap:"]):
+            return False
+        
+        # Check if file has at least one valid-looking cookie line (tab-separated, 7+ fields)
+        with open(cookies_path, "r", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                # Valid Netscape cookie lines are tab-separated with 7 fields
+                parts = line.split("\t")
+                if len(parts) >= 7:
+                    return True
+        
+        return False
+    except Exception:
+        return False
+
+
 def resolve_media_urls(
     binary_path: str,
     url: str,
@@ -115,8 +152,9 @@ def resolve_media_urls(
     Use yt-dlp with -g to resolve direct media URL(s) for the given page URL.
 
     We only select MP4 formats with both video and audio.
-    If running on Render.com and a cookies.txt file exists alongside this script,
-    it is used automatically.
+    If running on Render.com, we try to use cookies from the installed Firefox
+    profile via yt-dlp's --cookies-from-browser firefox. As a fallback, if a
+    valid Netscape-format cookies.txt exists alongside this script, it is used.
     """
     cmd = [binary_path]
 
@@ -127,12 +165,15 @@ def resolve_media_urls(
         # Default: best MP4 format that already includes both video and audio
         cmd += ["-f", "best[ext=mp4][vcodec!=none][acodec!=none]"]
 
-    # Use cookies.txt automatically only when running on Render.com
-    # (Render sets the env var RENDER=true)
+    # On Render.com, prefer cookies from Firefox (yt-dlp docs):
+    #   yt-dlp --cookies-from-browser firefox URL
+    # Fallback to cookies.txt only if it is valid Netscape format.
     if os.environ.get("RENDER", "").lower() == "true":
+        cmd += ["--cookies-from-browser", "firefox"]
+
         script_dir = os.path.dirname(os.path.abspath(__file__))
         cookies_path = os.path.join(script_dir, "cookies.txt")
-        if os.path.isfile(cookies_path):
+        if _is_valid_cookies_file(cookies_path):
             cmd += ["--cookies", cookies_path]
 
     cmd += ["-g", url]
@@ -144,7 +185,16 @@ def resolve_media_urls(
             stderr=subprocess.STDOUT,
         )
     except subprocess.CalledProcessError as e:
-        msg = e.output.strip() if e.output else f"yt-dlp failed with exit code {e.returncode}"
+        # Filter out cookie-related warnings from error messages
+        error_lines = []
+        if e.output:
+            for line in e.output.splitlines():
+                line = line.strip()
+                # Skip cookie file format warnings
+                if "skipping cookie file entry" in line.lower() or "does not look like a netscape format" in line.lower():
+                    continue
+                error_lines.append(line)
+        msg = "\n".join(error_lines).strip() if error_lines else f"yt-dlp failed with exit code {e.returncode}"
         raise RuntimeError(msg) from e
 
     # Keep only lines that look like actual URLs, drop warnings and other text
