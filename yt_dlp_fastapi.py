@@ -28,17 +28,6 @@ from typing import List, Optional
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, HttpUrl
 
-# Ensure Deno (yt-dlp's JS runtime) is discoverable at runtime.
-# Check both the project-local .deno (used on Render) and the home directory.
-_script_dir = os.path.dirname(os.path.abspath(__file__))
-for _deno_bin in [
-    os.path.join(_script_dir, ".deno", "bin"),
-    os.path.join(os.path.expanduser("~"), ".deno", "bin"),
-]:
-    if os.path.isdir(_deno_bin) and _deno_bin not in os.environ.get("PATH", ""):
-        os.environ["PATH"] = _deno_bin + os.pathsep + os.environ.get("PATH", "")
-        break
-
 YT_DLP_BINARY_NAME = "yt-dlp_linux"
 
 

@@ -11,12 +11,6 @@ set -e
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$PROJECT_DIR"
 
-# Add Deno to PATH (installed into project dir during build)
-if [ -d "$PROJECT_DIR/.deno/bin" ]; then
-    export PATH="$PROJECT_DIR/.deno/bin:$PATH"
-    echo "Deno found: $(deno --version | head -1)"
-fi
-
 # Decrypt cookies.sqlite.enc into a Firefox profile directory so
 # yt-dlp --cookies-from-browser firefox can find it at runtime.
 # COOKIES_KEY env var must be set in Render dashboard.
