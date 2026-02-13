@@ -141,7 +141,14 @@ def resolve_media_urls(
             stderr=subprocess.STDOUT,
         )
     except subprocess.CalledProcessError as e:
-        # Filter out cookie-related warnings from error messages
+        # Log full yt-dlp command and raw output to stderr for debugging
+        debug_cmd = " ".join(cmd)
+        print(f"[yt-dlp DEBUG] Command failed: {debug_cmd}", file=sys.stderr)
+        if e.output:
+            print("[yt-dlp DEBUG] Raw output:", file=sys.stderr)
+            print(e.output, file=sys.stderr)
+
+        # Filter out cookie-related warnings from error messages returned to client
         error_lines = []
         if e.output:
             for line in e.output.splitlines():
