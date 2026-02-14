@@ -12,7 +12,7 @@ Usage:
     #   pip install -r requirements.txt
     #
     # Start the server from the project root:
-    #   python3 yt_dlp_fastapi.py
+    #   python3 app.py
     #
     # Example request:
     #   curl -X POST "http://127.0.0.1:8000/resolve" \
@@ -29,6 +29,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, HttpUrl
 
 YT_DLP_BINARY_NAME = "yt-dlp_linux"
+_script_dir = os.path.dirname(os.path.abspath(__file__))
 
 
 class ResolveRequest(BaseModel):
@@ -48,7 +49,7 @@ app = FastAPI(title="yt-dlp MP4 media URL resolver")
 def get_yt_dlp_path() -> str:
     """
     Return the path to the yt-dlp binary, downloading it on-demand if needed
-    using the existing download_yt_dlp.py helper.
+    using the existing download_ytdlp.py helper.
     """
     script_dir = os.path.dirname(os.path.abspath(__file__))
     binary_path = os.path.join(script_dir, YT_DLP_BINARY_NAME)
@@ -56,11 +57,11 @@ def get_yt_dlp_path() -> str:
     if os.path.isfile(binary_path):
         return binary_path
 
-    downloader = os.path.join(script_dir, "download_yt_dlp.py")
+    downloader = os.path.join(script_dir, "download_ytdlp.py")
     if not os.path.isfile(downloader):
         raise FileNotFoundError(
             f"'{YT_DLP_BINARY_NAME}' not found in {script_dir}, and "
-            f"'download_yt_dlp.py' is also missing, so the binary "
+            f"'download_ytdlp.py' is also missing, so the binary "
             "cannot be downloaded automatically."
         )
 
@@ -71,13 +72,13 @@ def get_yt_dlp_path() -> str:
         )
     except subprocess.CalledProcessError as e:
         raise FileNotFoundError(
-            f"Failed to download '{YT_DLP_BINARY_NAME}' using download_yt_dlp.py "
+            f"Failed to download '{YT_DLP_BINARY_NAME}' using download_ytdlp.py "
             f"(exit code {e.returncode})."
         ) from e
 
     if not os.path.isfile(binary_path):
         raise FileNotFoundError(
-            f"After running download_yt_dlp.py, '{YT_DLP_BINARY_NAME}' "
+            f"After running download_ytdlp.py, '{YT_DLP_BINARY_NAME}' "
             "still does not exist."
         )
 
@@ -249,5 +250,5 @@ async def resolve(request: ResolveRequest) -> ResolveResponse:
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("yt_dlp_fastapi:app", host="0.0.0.0", port=10000, reload=True)
+    uvicorn.run("app:app", host="0.0.0.0", port=10000, reload=True)
 

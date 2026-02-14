@@ -25,7 +25,7 @@ def main() -> None:
     if not os.path.isfile(binary_path):
         print(
             f"Error: '{YT_DLP_BINARY_NAME}' not found in {script_dir}. "
-            "Run 'download_yt_dlp.py' first to download the binary.",
+            "Run 'download_ytdlp.py' first to download the binary.",
             file=sys.stderr,
         )
         sys.exit(1)

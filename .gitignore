@@ -16,6 +16,10 @@ env/
 # OS files
 .DS_Store
 
+# Secrets
+config.txt
+cookies.sqlite
+
 # Downloads and media
 *.webm
 *.mp4
