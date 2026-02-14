@@ -191,7 +191,14 @@ def resolve_media_urls(
     else:
         cmd += ["-f", "best[ext=mp4][vcodec!=none][acodec!=none]"]
 
-    # Try cookies in order: cookies.txt file > Firefox browser > no cookies
+    # Try cookies in order: Firefox browser > cookies.txt > no cookies
+    if _has_firefox_cookies():
+        cmd_with_cookies = cmd + ["--cookies-from-browser", "firefox", "-g", url]
+        try:
+            return _run_yt_dlp(cmd_with_cookies)
+        except RuntimeError:
+            print("[yt-dlp] Firefox cookie attempt failed, trying cookies.txt...", file=sys.stderr)
+
     cookies_file = _get_cookies_file()
     if cookies_file:
         cmd_with_cookies = cmd + ["--cookies", cookies_file, "-g", url]
@@ -199,14 +206,8 @@ def resolve_media_urls(
             return _run_yt_dlp(cmd_with_cookies)
         except RuntimeError:
             print("[yt-dlp] cookies.txt attempt failed, trying without cookies...", file=sys.stderr)
-    elif os.environ.get("RENDER", "").lower() == "true" and _has_firefox_cookies():
-        cmd_with_cookies = cmd + ["--cookies-from-browser", "firefox", "-g", url]
-        try:
-            return _run_yt_dlp(cmd_with_cookies)
-        except RuntimeError:
-            print("[yt-dlp] Firefox cookie attempt failed, trying without cookies...", file=sys.stderr)
 
-    # Run without cookies (or as fallback)
+    # Fallback: no cookies
     cmd += ["-g", url]
     return _run_yt_dlp(cmd)
 
