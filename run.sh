@@ -77,6 +77,10 @@ else
         python3 download_ytdlp.py
     fi
 
+    # Encrypt cookies from local Firefox profile.
+    echo "[local] Encrypting cookies from Firefox profile..."
+    bash "$PROJECT_DIR/encrypt_cookies.sh"
+
     echo "[local] Starting server (with reload)..."
     python3 app.py
 fi
