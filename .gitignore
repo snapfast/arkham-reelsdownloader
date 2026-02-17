@@ -19,6 +19,10 @@ env/
 # Secrets
 config.txt
 cookies.sqlite
+cookies.sqlite.enc
+
+# Downloaded binaries
+yt-dlp_linux
 
 # Downloads and media
 *.webm

@@ -1,0 +1,13 @@
+# Sent to Cloud Build for source deployment.
+# cookies.sqlite is intentionally included (needed by Dockerfile).
+
+.git
+.venv
+__pycache__
+*.pyc
+*.enc
+config.txt
+run.sh
+backup/
+sample.txt
+README.md

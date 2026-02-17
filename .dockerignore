@@ -1,0 +1,11 @@
+.git
+.venv
+__pycache__
+*.pyc
+*.enc
+config.txt
+run.sh
+build.sh
+backup/
+sample.txt
+README.md
