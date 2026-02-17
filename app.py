@@ -22,8 +22,10 @@ Usage:
 
 import asyncio
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 from typing import List, Optional
 
 from fastapi import FastAPI, HTTPException
@@ -83,14 +85,14 @@ def _resolve_yt_dlp_path() -> str:
 
 def _quality_to_format(quality: int) -> str:
     if quality <= 360:
-        return "best[ext=mp4][height<=360][vcodec!=none][acodec!=none]"
+        return "best[ext=mp4][height<=360][vcodec!=none][acodec!=none]/best[height<=360][vcodec!=none][acodec!=none]"
     if quality <= 480:
-        return "best[ext=mp4][height<=480][vcodec!=none][acodec!=none]"
+        return "best[ext=mp4][height<=480][vcodec!=none][acodec!=none]/best[height<=480][vcodec!=none][acodec!=none]"
     if quality <= 720:
-        return "best[ext=mp4][height<=720][vcodec!=none][acodec!=none]"
+        return "best[ext=mp4][height<=720][vcodec!=none][acodec!=none]/best[height<=720][vcodec!=none][acodec!=none]"
     if quality <= 1080:
-        return "best[ext=mp4][height<=1080][vcodec!=none][acodec!=none]"
-    return "best[ext=mp4][height<=2160][vcodec!=none][acodec!=none]"
+        return "best[ext=mp4][height<=1080][vcodec!=none][acodec!=none]/best[height<=1080][vcodec!=none][acodec!=none]"
+    return "best[ext=mp4][height<=2160][vcodec!=none][acodec!=none]/best[height<=2160][vcodec!=none][acodec!=none]"
 
 
 def _run_yt_dlp_sync(cmd: list[str]) -> list[str]:
@@ -119,6 +121,9 @@ async def _run_yt_dlp(cmd: list[str]) -> list[str]:
     return await loop.run_in_executor(None, _run_yt_dlp_sync, cmd)
 
 
+COOKIES_FILE = "/secrets/cookies.txt"
+
+
 async def resolve_media_urls(url: str, quality: Optional[int] = None) -> list[str]:
     """Resolve direct media URL(s) using yt-dlp."""
     cmd = [_binary_path]
@@ -126,10 +131,23 @@ async def resolve_media_urls(url: str, quality: Optional[int] = None) -> list[st
     if quality is not None:
         cmd += ["-f", _quality_to_format(quality)]
     else:
-        cmd += ["-f", "best[ext=mp4][vcodec!=none][acodec!=none]"]
+        cmd += ["-f", "best[ext=mp4][vcodec!=none][acodec!=none]/best[vcodec!=none][acodec!=none]"]
 
-    cmd += ["-g", url]
-    return await _run_yt_dlp(cmd)
+    tmp_cookies = None
+    try:
+        if os.path.isfile(COOKIES_FILE):
+            # Secret Manager mounts are read-only; copy to writable temp so yt-dlp can save back
+            tmp = tempfile.NamedTemporaryFile(suffix=".txt", delete=False)
+            tmp_cookies = tmp.name
+            tmp.close()
+            shutil.copy2(COOKIES_FILE, tmp_cookies)
+            cmd += ["--cookies", tmp_cookies]
+
+        cmd += ["-g", url]
+        return await _run_yt_dlp(cmd)
+    finally:
+        if tmp_cookies:
+            os.unlink(tmp_cookies)
 
 
 @app.post("/resolve", response_model=ResolveResponse)
