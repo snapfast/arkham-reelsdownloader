@@ -17,16 +17,17 @@ Usage:
     # Example request:
     #   curl -X POST "http://localhost:8080/resolve" \
     #        -H "Content-Type: application/json" \
-    #        -d '{"url": "https://www.youtube.com/watch?v=2fhRNk3HywI", "quality": 480}'
+    #        -d '{"url": "https://www.youtube.com/watch?v=2fhRNk3HywI", "quality": 720}'
 """
 
 import asyncio
+import json
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, HttpUrl
@@ -39,12 +40,18 @@ _binary_path: Optional[str] = None
 
 class ResolveRequest(BaseModel):
     url: HttpUrl
-    quality: Optional[int] = None
+    quality: int
 
 
 class ResolveResponse(BaseModel):
     input_url: HttpUrl
-    media_urls: List[str]
+    quality: int
+    media_url: str
+
+
+class FormatsResponse(BaseModel):
+    input_url: HttpUrl
+    available_qualities: List[int]
 
 
 app = FastAPI(title="yt-dlp MP4 media URL resolver")
@@ -83,16 +90,11 @@ def _resolve_yt_dlp_path() -> str:
     return binary_path
 
 
-def _quality_to_format(quality: int) -> str:
-    if quality <= 360:
-        return "best[ext=mp4][height<=360][vcodec!=none][acodec!=none]/best[height<=360][vcodec!=none][acodec!=none]"
-    if quality <= 480:
-        return "best[ext=mp4][height<=480][vcodec!=none][acodec!=none]/best[height<=480][vcodec!=none][acodec!=none]"
-    if quality <= 720:
-        return "best[ext=mp4][height<=720][vcodec!=none][acodec!=none]/best[height<=720][vcodec!=none][acodec!=none]"
-    if quality <= 1080:
-        return "best[ext=mp4][height<=1080][vcodec!=none][acodec!=none]/best[height<=1080][vcodec!=none][acodec!=none]"
-    return "best[ext=mp4][height<=2160][vcodec!=none][acodec!=none]/best[height<=2160][vcodec!=none][acodec!=none]"
+_QUALITY_FORMATS: Dict[int, str] = {
+    # [protocol!*=m3u8] excludes HLS streams — we want direct HTTP mp4, not an m3u8 playlist
+    q: f"b[ext=mp4][protocol!*=m3u8][height<={q}]/b[protocol!*=m3u8][height<={q}]"
+    for q in (360, 480, 720, 1080, 2160)
+}
 
 
 def _run_yt_dlp_sync(cmd: list[str]) -> list[str]:
@@ -124,14 +126,9 @@ async def _run_yt_dlp(cmd: list[str]) -> list[str]:
 COOKIES_FILE = "/secrets/cookies.txt"
 
 
-async def resolve_media_urls(url: str, quality: Optional[int] = None) -> list[str]:
-    """Resolve direct media URL(s) using yt-dlp."""
-    cmd = [_binary_path]
-
-    if quality is not None:
-        cmd += ["-f", _quality_to_format(quality)]
-    else:
-        cmd += ["-f", "best[ext=mp4][vcodec!=none][acodec!=none]/best[vcodec!=none][acodec!=none]"]
+async def resolve_media_urls(url: str, quality: int) -> Optional[str]:
+    """Resolve the first direct media URL for a given quality using yt-dlp."""
+    cmd = [_binary_path, "-f", _QUALITY_FORMATS[quality]]
 
     tmp_cookies = None
     try:
@@ -144,7 +141,10 @@ async def resolve_media_urls(url: str, quality: Optional[int] = None) -> list[st
             cmd += ["--cookies", tmp_cookies]
 
         cmd += ["-g", url]
-        return await _run_yt_dlp(cmd)
+        urls = await _run_yt_dlp(cmd)
+        return urls[0] if urls else None
+    except RuntimeError:
+        return None
     finally:
         if tmp_cookies:
             os.unlink(tmp_cookies)
@@ -152,22 +152,68 @@ async def resolve_media_urls(url: str, quality: Optional[int] = None) -> list[st
 
 @app.post("/resolve", response_model=ResolveResponse)
 async def resolve(request: ResolveRequest) -> ResolveResponse:
-    """Resolve a video page URL into direct MP4 media URL(s) with audio."""
-    if request.quality is not None and request.quality not in (360, 480, 720, 1080, 2160):
+    """Resolve a video page URL into a direct MP4 media URL for the requested quality."""
+    if request.quality not in _QUALITY_FORMATS:
         raise HTTPException(
             status_code=400,
-            detail="Invalid quality. Allowed values: 360, 480, 720, 1080, 2160 or omit for best.",
+            detail=f"Invalid quality. Allowed values: {sorted(_QUALITY_FORMATS)}.",
         )
 
+    media_url = await resolve_media_urls(str(request.url), request.quality)
+
+    if media_url is None:
+        raise HTTPException(status_code=502, detail="yt-dlp did not return a direct media URL.")
+
+    return ResolveResponse(input_url=request.url, quality=request.quality, media_url=media_url)
+
+
+def _fetch_formats_sync(cmd: list[str]) -> dict:
+    return json.loads(subprocess.check_output(cmd, text=True, stderr=subprocess.DEVNULL))
+
+
+async def _available_qualities(url: str) -> List[int]:
+    """Return which target qualities the video actually has formats for."""
+    cmd = [_binary_path, "-j"]
+
+    tmp_cookies = None
     try:
-        media_urls = await resolve_media_urls(str(request.url), quality=request.quality)
-    except RuntimeError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        if os.path.isfile(COOKIES_FILE):
+            tmp = tempfile.NamedTemporaryFile(suffix=".txt", delete=False)
+            tmp_cookies = tmp.name
+            tmp.close()
+            shutil.copy2(COOKIES_FILE, tmp_cookies)
+            cmd += ["--cookies", tmp_cookies]
 
-    if not media_urls:
-        raise HTTPException(status_code=502, detail="yt-dlp did not return any direct media URLs.")
+        cmd += [url]
+        loop = asyncio.get_running_loop()
+        info = await loop.run_in_executor(None, _fetch_formats_sync, cmd)
+    finally:
+        if tmp_cookies:
+            os.unlink(tmp_cookies)
 
-    return ResolveResponse(input_url=request.url, media_urls=media_urls)
+    formats = info.get("formats", [])
+    # Highest height available in non-HLS formats
+    max_height = max(
+        (f.get("height") or 0 for f in formats if "m3u8" not in f.get("protocol", "")),
+        default=0,
+    )
+    # A quality bucket Q is available if the video has content at ≥90% of that height
+    return [q for q in sorted(_QUALITY_FORMATS) if max_height >= q * 0.9]
+
+
+class FormatsRequest(BaseModel):
+    url: HttpUrl
+
+
+@app.post("/formats", response_model=FormatsResponse)
+async def formats(request: FormatsRequest) -> FormatsResponse:
+    """Return which quality levels are available for a video URL."""
+    try:
+        qualities = await _available_qualities(str(request.url))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"yt-dlp failed: {e}")
+
+    return FormatsResponse(input_url=request.url, available_qualities=qualities)
 
 
 if __name__ == "__main__":

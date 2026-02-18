@@ -4,7 +4,7 @@ set -euo pipefail
 # Deploy to GCP Cloud Run from source (Cloud Build builds the image).
 # Reads GCP_PROJECT, GCP_REGION, GCP_SERVICE from config.txt.
 #
-# Usage:  bash build.sh
+# Usage:  bash build_prod.sh
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$PROJECT_DIR"
