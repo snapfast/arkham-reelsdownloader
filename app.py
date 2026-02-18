@@ -30,7 +30,7 @@ import tempfile
 from typing import Dict, List, Optional
 
 import httpx
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, HttpUrl
@@ -256,19 +256,46 @@ _PROXY_HEADERS = {
 
 
 @app.get("/proxy")
-async def proxy(url: str = Query(..., description="Direct media URL to stream")):
-    """Proxy a direct media URL through the server to avoid client-side CORS restrictions."""
+async def proxy(
+    url: str = Query(..., description="Direct media URL to stream"),
+    range: Optional[str] = Header(None),
+):
+    """Proxy a direct media URL through the server to avoid client-side CORS restrictions.
+
+    Forwards Content-Length and range-request headers so clients can display download progress.
+    """
     if not url.startswith(("http://", "https://")):
         raise HTTPException(status_code=400, detail="Invalid URL.")
 
-    async def _stream():
-        """Keep httpx client alive for the full duration of the streaming response."""
-        async with httpx.AsyncClient(follow_redirects=True, timeout=None) as client:
-            async with client.stream("GET", url, headers=_PROXY_HEADERS) as upstream:
-                async for chunk in upstream.aiter_bytes(chunk_size=65536):
-                    yield chunk
+    req_headers = dict(_PROXY_HEADERS)
+    if range:
+        req_headers["Range"] = range
 
-    return StreamingResponse(_stream(), media_type="video/mp4")
+    # Open the upstream connection eagerly so we can read its headers before
+    # returning the StreamingResponse (Content-Length is needed for progress).
+    client = httpx.AsyncClient(follow_redirects=True, timeout=None)
+    req = client.build_request("GET", url, headers=req_headers)
+    upstream = await client.send(req, stream=True)
+
+    fwd_headers: dict[str, str] = {}
+    for h in ("content-length", "accept-ranges", "content-range"):
+        if h in upstream.headers:
+            fwd_headers[h] = upstream.headers[h]
+
+    async def _stream():
+        try:
+            async for chunk in upstream.aiter_bytes(chunk_size=65536):
+                yield chunk
+        finally:
+            await upstream.aclose()
+            await client.aclose()
+
+    return StreamingResponse(
+        _stream(),
+        status_code=upstream.status_code,
+        media_type="video/mp4",
+        headers=fwd_headers,
+    )
 
 
 if __name__ == "__main__":
