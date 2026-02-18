@@ -210,12 +210,20 @@ async def _available_qualities(url: str) -> List[int]:
             os.unlink(tmp_cookies)
 
     formats = info.get("formats", [])
-    # Highest height available in non-HLS formats
-    max_height = max(
-        (f.get("height") or 0 for f in formats if "m3u8" not in f.get("protocol", "")),
-        default=0,
-    )
-    # A quality bucket Q is available if the video has content at ≥90% of that height
+    # Only consider combined (video+audio) non-HLS mp4 formats — separate DASH streams
+    # cannot be served without merging, so they must not count toward available qualities.
+    combined_heights = [
+        f.get("height") or 0
+        for f in formats
+        if (
+            f.get("vcodec") not in ("none", None, "")
+            and f.get("acodec") not in ("none", None, "")
+            and f.get("ext") == "mp4"
+            and "m3u8" not in f.get("protocol", "")
+        )
+    ]
+    max_height = max(combined_heights, default=0)
+    # A quality bucket Q is available if the video has a combined stream at ≥90% of that height
     return [q for q in sorted(_QUALITY_FORMATS) if max_height >= q * 0.9]
 
 

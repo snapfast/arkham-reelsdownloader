@@ -33,6 +33,7 @@ gcloud run deploy "$GCP_SERVICE" \
     --region "$GCP_REGION" \
     --project "$GCP_PROJECT" \
     --port 8080 \
+    --memory 512Mi \
     --allow-unauthenticated
 
 echo ""
