@@ -152,8 +152,6 @@ async def resolve_media_urls(url: str, quality: int) -> Optional[str]:
         cmd += ["-g", url]
         urls = await _run_yt_dlp(cmd)
         return urls[0] if urls else None
-    except RuntimeError:
-        return None
     finally:
         if tmp_cookies:
             os.unlink(tmp_cookies)
@@ -168,16 +166,25 @@ async def resolve(request: ResolveRequest) -> ResolveResponse:
             detail=f"Invalid quality. Allowed values: {sorted(_QUALITY_FORMATS)}.",
         )
 
-    media_url = await resolve_media_urls(str(request.url), request.quality)
+    try:
+        media_url = await resolve_media_urls(str(request.url), request.quality)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"yt-dlp failed: {e}")
 
     if media_url is None:
+        print(f"[yt-dlp/resolve] No media URL returned for {request.url}", file=sys.stderr)
         raise HTTPException(status_code=502, detail="yt-dlp did not return a direct media URL.")
 
     return ResolveResponse(input_url=request.url, quality=request.quality, media_url=media_url)
 
 
 def _fetch_formats_sync(cmd: list[str]) -> dict:
-    return json.loads(subprocess.check_output(cmd, text=True, stderr=subprocess.DEVNULL))
+    try:
+        return json.loads(subprocess.check_output(cmd, text=True, stderr=subprocess.PIPE))
+    except subprocess.CalledProcessError as e:
+        msg = e.stderr.strip() or f"yt-dlp exited with code {e.returncode}"
+        print(f"[yt-dlp/formats] Command failed: {' '.join(cmd)}\n{msg}", file=sys.stderr)
+        raise RuntimeError(msg) from e
 
 
 async def _available_qualities(url: str) -> List[int]:
