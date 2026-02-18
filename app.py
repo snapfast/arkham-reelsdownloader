@@ -30,6 +30,7 @@ import tempfile
 from typing import Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, HttpUrl
 
 YT_DLP_BINARY_NAME = "yt-dlp_linux"
@@ -55,6 +56,14 @@ class FormatsResponse(BaseModel):
 
 
 app = FastAPI(title="yt-dlp MP4 media URL resolver")
+
+# TODO: restrict origins before going to prod
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 @app.on_event("startup")
