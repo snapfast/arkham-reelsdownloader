@@ -29,8 +29,10 @@ import sys
 import tempfile
 from typing import Dict, List, Optional
 
-from fastapi import FastAPI, HTTPException
+import httpx
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, HttpUrl
 
 YT_DLP_BINARY_NAME = "yt-dlp_linux"
@@ -102,7 +104,7 @@ def _resolve_yt_dlp_path() -> str:
 _QUALITY_FORMATS: Dict[int, str] = {
     # [protocol!*=m3u8] excludes HLS streams — we want direct HTTP mp4, not an m3u8 playlist
     q: f"b[ext=mp4][protocol!*=m3u8][height<={q}]/b[protocol!*=m3u8][height<={q}]"
-    for q in (360, 480, 720, 1080, 2160)
+    for q in (144, 240, 360, 480, 720, 1080, 2160)
 }
 
 
@@ -230,6 +232,35 @@ async def formats(request: FormatsRequest) -> FormatsResponse:
         raise HTTPException(status_code=502, detail=f"yt-dlp failed: {e}")
 
     return FormatsResponse(input_url=request.url, available_qualities=qualities)
+
+
+_PROXY_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "*/*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer": "https://www.youtube.com/",
+    "Origin": "https://www.youtube.com",
+}
+
+
+@app.get("/proxy")
+async def proxy(url: str = Query(..., description="Direct media URL to stream")):
+    """Proxy a direct media URL through the server to avoid client-side CORS restrictions."""
+    if not url.startswith(("http://", "https://")):
+        raise HTTPException(status_code=400, detail="Invalid URL.")
+
+    async def _stream():
+        """Keep httpx client alive for the full duration of the streaming response."""
+        async with httpx.AsyncClient(follow_redirects=True, timeout=None) as client:
+            async with client.stream("GET", url, headers=_PROXY_HEADERS) as upstream:
+                async for chunk in upstream.aiter_bytes(chunk_size=65536):
+                    yield chunk
+
+    return StreamingResponse(_stream(), media_type="video/mp4")
 
 
 if __name__ == "__main__":
