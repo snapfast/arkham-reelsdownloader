@@ -35,6 +35,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, HttpUrl
 
+from models.alllinks import (
+    AllLinksRequest,
+    AllLinksResponse,
+    FormatLink,
+    HeatmapPoint,
+    ThumbnailLink,
+)
+
 YT_DLP_BINARY_NAME = "yt-dlp_linux"
 
 # Resolved once at startup, reused on every request.
@@ -43,18 +51,18 @@ _binary_path: Optional[str] = None
 
 class ResolveRequest(BaseModel):
     url: HttpUrl
-    quality: int
+    quality: str  # e.g. "720p" for video or "mp3" for audio
 
 
 class ResolveResponse(BaseModel):
     input_url: HttpUrl
-    quality: int
+    quality: str
     media_url: str
 
 
 class FormatsResponse(BaseModel):
     input_url: HttpUrl
-    available_qualities: List[int]
+    available_qualities: List[str]  # e.g. ["360p", "720p", "mp3"]
 
 
 app = FastAPI(title="yt-dlp MP4 media URL resolver")
@@ -101,11 +109,67 @@ def _resolve_yt_dlp_path() -> str:
     return binary_path
 
 
-_QUALITY_FORMATS: Dict[int, str] = {
-    # [protocol!*=m3u8] excludes HLS streams — we want direct HTTP mp4, not an m3u8 playlist
-    q: f"b[ext=mp4][protocol!*=m3u8][height<={q}]/b[protocol!*=m3u8][height<={q}]"
-    for q in (144, 240, 360, 480, 720, 1080, 2160)
+# ── Format selector map: quality label → yt-dlp -f string ─────────────────────────────────────
+#
+# Video labels ("144p" … "2160p"):
+#   Prefer combined mp4 (video+audio in one file, no ffmpeg merge needed).
+#   [protocol!*=m3u8] excludes HLS playlists; we want direct HTTP byte-range URLs.
+#   Fallback without ext=mp4 covers platforms that only offer non-mp4 combined streams.
+#
+# Audio labels — YouTube serves two codec families, each at multiple bitrates:
+#
+#   m4a / AAC  (MPEG-4 Audio container, lossy AAC codec)
+#     "m4a-48k"   ≈ 48 kbps  — yt-dlp format 139
+#     "m4a-128k"  ≈ 128 kbps — yt-dlp format 140
+#
+#   webm / Opus  (WebM container, Opus codec — best quality-per-bit)
+#     "opus-50k"  ≈ 50 kbps  — yt-dlp format 249
+#     "opus-70k"  ≈ 70 kbps  — yt-dlp format 250
+#     "opus-160k" ≈ 160 kbps — yt-dlp format 251
+#
+#   Selectors use abr (average bitrate) thresholds.  Each falls back to "best of that ext"
+#   so the request still succeeds even when a specific bitrate tier is absent.
+#   [protocol!*=m3u8] skips DASH/HLS segments that can't be range-requested directly.
+_FORMAT_MAP: Dict[str, str] = {
+    # ── Video ──────────────────────────────────────────────────────────────────────────────────
+    "144p":      "b[ext=mp4][protocol!*=m3u8][height<=144]/b[protocol!*=m3u8][height<=144]",
+    "240p":      "b[ext=mp4][protocol!*=m3u8][height<=240]/b[protocol!*=m3u8][height<=240]",
+    "360p":      "b[ext=mp4][protocol!*=m3u8][height<=360]/b[protocol!*=m3u8][height<=360]",
+    "480p":      "b[ext=mp4][protocol!*=m3u8][height<=480]/b[protocol!*=m3u8][height<=480]",
+    "720p":      "b[ext=mp4][protocol!*=m3u8][height<=720]/b[protocol!*=m3u8][height<=720]",
+    "1080p":     "b[ext=mp4][protocol!*=m3u8][height<=1080]/b[protocol!*=m3u8][height<=1080]",
+    "2160p":     "b[ext=mp4][protocol!*=m3u8][height<=2160]/b[protocol!*=m3u8][height<=2160]",
+    # ── Audio: m4a / AAC ───────────────────────────────────────────────────────────────────────
+    "m4a-48k":   "bestaudio[ext=m4a][abr<=64][protocol!*=m3u8]",
+    "m4a-128k":  "bestaudio[ext=m4a][abr>64][protocol!*=m3u8]/bestaudio[ext=m4a][protocol!*=m3u8]",
+    # ── Audio: webm / Opus ─────────────────────────────────────────────────────────────────────
+    "opus-50k":  "bestaudio[ext=webm][abr<=64][protocol!*=m3u8]",
+    "opus-70k":  "bestaudio[ext=webm][abr>64][abr<=100][protocol!*=m3u8]",
+    "opus-160k": "bestaudio[ext=webm][abr>100][protocol!*=m3u8]/bestaudio[ext=webm][protocol!*=m3u8]",
 }
+
+# Height (px) per video label — used for availability bucketing in /formats.
+_VIDEO_HEIGHTS: Dict[str, int] = {
+    "144p": 144, "240p": 240, "360p": 360, "480p": 480,
+    "720p": 720, "1080p": 1080, "2160p": 2160,
+}
+
+# Audio label → (container_ext, min_abr_exclusive, max_abr_inclusive_or_None)
+# A label is "available" when the JSON contains at least one matching audio-only format.
+_AUDIO_BUCKETS: Dict[str, tuple] = {
+    "m4a-48k":   ("m4a",  0,   64),
+    "m4a-128k":  ("m4a",  64,  None),
+    "opus-50k":  ("webm", 0,   64),
+    "opus-70k":  ("webm", 64,  100),
+    "opus-160k": ("webm", 100, None),
+}
+
+# Canonical display order returned by /formats (video ascending, then audio by codec+bitrate).
+_QUALITY_ORDER: List[str] = [
+    "144p", "240p", "360p", "480p", "720p", "1080p", "2160p",
+    "m4a-48k", "m4a-128k",
+    "opus-50k", "opus-70k", "opus-160k",
+]
 
 
 def _run_yt_dlp_sync(cmd: list[str]) -> list[str]:
@@ -137,9 +201,9 @@ async def _run_yt_dlp(cmd: list[str]) -> list[str]:
 COOKIES_FILE = "/secrets/cookies.txt"
 
 
-async def resolve_media_urls(url: str, quality: int) -> Optional[str]:
-    """Resolve the first direct media URL for a given quality using yt-dlp."""
-    cmd = [_binary_path, "-f", _QUALITY_FORMATS[quality]]
+async def resolve_media_urls(url: str, quality: str) -> Optional[str]:
+    """Resolve the first direct media URL for a given quality label using yt-dlp."""
+    cmd = [_binary_path, "-f", _FORMAT_MAP[quality]]
 
     tmp_cookies = None
     try:
@@ -151,7 +215,7 @@ async def resolve_media_urls(url: str, quality: int) -> Optional[str]:
             shutil.copy2(COOKIES_FILE, tmp_cookies)
             cmd += ["--cookies", tmp_cookies]
 
-        cmd += ["-g", url]
+        cmd += ["-g", "--no-playlist", url]
         urls = await _run_yt_dlp(cmd)
         return urls[0] if urls else None
     finally:
@@ -161,11 +225,19 @@ async def resolve_media_urls(url: str, quality: int) -> Optional[str]:
 
 @app.post("/resolve", response_model=ResolveResponse)
 async def resolve(request: ResolveRequest) -> ResolveResponse:
-    """Resolve a video page URL into a direct MP4 media URL for the requested quality."""
-    if request.quality not in _QUALITY_FORMATS:
+    """Resolve a video page URL into a direct media URL.
+
+    `quality` accepts:
+    - Video : "144p" | "240p" | "360p" | "480p" | "720p" | "1080p" | "2160p"
+    - Audio (m4a/AAC)  : "m4a-48k"  | "m4a-128k"
+    - Audio (webm/Opus): "opus-50k" | "opus-70k" | "opus-160k"
+
+    Use /formats first to discover which labels are actually available for a given URL.
+    """
+    if request.quality not in _FORMAT_MAP:
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid quality. Allowed values: {sorted(_QUALITY_FORMATS)}.",
+            detail=f"Invalid quality '{request.quality}'. Allowed values: {_QUALITY_ORDER}.",
         )
 
     try:
@@ -189,9 +261,9 @@ def _fetch_formats_sync(cmd: list[str]) -> dict:
         raise RuntimeError(msg) from e
 
 
-async def _available_qualities(url: str) -> List[int]:
-    """Return which target qualities the video actually has formats for."""
-    cmd = [_binary_path, "-j"]
+async def _available_qualities(url: str) -> List[str]:
+    """Return which quality labels are available for the given URL, in _QUALITY_ORDER order."""
+    cmd = [_binary_path, "-j", "--no-playlist"]
 
     tmp_cookies = None
     try:
@@ -210,8 +282,10 @@ async def _available_qualities(url: str) -> List[int]:
             os.unlink(tmp_cookies)
 
     formats = info.get("formats", [])
-    # Only consider combined (video+audio) non-HLS mp4 formats — separate DASH streams
-    # cannot be served without merging, so they must not count toward available qualities.
+
+    # --- Video labels ---
+    # Only combined (video+audio) non-HLS mp4 streams; DASH-only streams can't be served
+    # without a server-side merge (which we deliberately avoid).
     combined_heights = [
         f.get("height") or 0
         for f in formats
@@ -223,8 +297,27 @@ async def _available_qualities(url: str) -> List[int]:
         )
     ]
     max_height = max(combined_heights, default=0)
-    # A quality bucket Q is available if the video has a combined stream at ≥90% of that height
-    return [q for q in sorted(_QUALITY_FORMATS) if max_height >= q * 0.9]
+    # A label is available if the video has a combined stream at ≥90% of that height.
+    available = [
+        label for label, h in _VIDEO_HEIGHTS.items() if max_height >= h * 0.9
+    ]
+
+    # --- Audio labels (m4a-48k, m4a-128k, opus-50k, opus-70k, opus-160k) ---
+    # Each bucket is available when the JSON contains at least one audio-only format
+    # whose container extension and abr fall within the bucket's range.
+    for label, (ext, min_abr, max_abr) in _AUDIO_BUCKETS.items():
+        if any(
+            f.get("vcodec") == "none"
+            and f.get("acodec") not in ("none", None, "")
+            and f.get("ext") == ext
+            and (f.get("abr") or 0) > min_abr
+            and (max_abr is None or (f.get("abr") or 0) <= max_abr)
+            for f in formats
+        ):
+            available.append(label)
+
+    # Return in canonical display order.
+    return [q for q in _QUALITY_ORDER if q in available]
 
 
 class FormatsRequest(BaseModel):
@@ -233,7 +326,11 @@ class FormatsRequest(BaseModel):
 
 @app.post("/formats", response_model=FormatsResponse)
 async def formats(request: FormatsRequest) -> FormatsResponse:
-    """Return which quality levels are available for a video URL."""
+    """Return which quality labels are available for a URL.
+
+    available_qualities is an ordered list of strings, e.g. ["360p", "720p", "mp3"].
+    Pass any of these directly as the `quality` field of /resolve.
+    """
     try:
         qualities = await _available_qualities(str(request.url))
     except Exception as e:
@@ -282,6 +379,9 @@ async def proxy(
         if h in upstream.headers:
             fwd_headers[h] = upstream.headers[h]
 
+    # Use the upstream content-type so audio streams are served with the correct MIME type.
+    media_type = upstream.headers.get("content-type", "application/octet-stream").split(";")[0].strip()
+
     async def _stream():
         try:
             async for chunk in upstream.aiter_bytes(chunk_size=65536):
@@ -293,9 +393,154 @@ async def proxy(
     return StreamingResponse(
         _stream(),
         status_code=upstream.status_code,
-        media_type="video/mp4",
+        media_type=media_type,
         headers=fwd_headers,
     )
+
+
+def _build_alllinks_response(info: dict) -> AllLinksResponse:
+    """Convert raw yt-dlp -J dict into an AllLinksResponse."""
+
+    formats: list[FormatLink] = []
+    for f in info.get("formats", []):
+        raw_url = f.get("url", "")
+        if not raw_url:
+            continue
+        formats.append(
+            FormatLink(
+                format_id=f.get("format_id", ""),
+                format_label=f.get("format", ""),
+                format_note=f.get("format_note"),
+                ext=f.get("ext", ""),
+                protocol=f.get("protocol", ""),
+                container=f.get("container"),
+                width=f.get("width"),
+                height=f.get("height"),
+                fps=f.get("fps"),
+                resolution=f.get("resolution"),
+                aspect_ratio=f.get("aspect_ratio"),
+                vcodec=f.get("vcodec"),
+                acodec=f.get("acodec"),
+                audio_ext=f.get("audio_ext"),
+                video_ext=f.get("video_ext"),
+                dynamic_range=f.get("dynamic_range"),
+                tbr=f.get("tbr"),
+                vbr=f.get("vbr"),
+                abr=f.get("abr"),
+                asr=f.get("asr"),
+                audio_channels=f.get("audio_channels"),
+                filesize=f.get("filesize"),
+                filesize_approx=f.get("filesize_approx"),
+                quality=f.get("quality"),
+                has_drm=bool(f.get("has_drm", False)),
+                source_preference=f.get("source_preference"),
+                url=raw_url,
+            )
+        )
+
+    thumbnails: list[ThumbnailLink] = []
+    for t in info.get("thumbnails", []):
+        raw_url = t.get("url", "")
+        if not raw_url:
+            continue
+        thumbnails.append(
+            ThumbnailLink(
+                id=str(t.get("id", "")),
+                url=raw_url,
+                width=t.get("width"),
+                height=t.get("height"),
+                resolution=t.get("resolution"),
+                preference=t.get("preference"),
+            )
+        )
+
+    heatmap_points = None
+    if info.get("heatmap"):
+        heatmap_points = [
+            HeatmapPoint(
+                start_time=p["start_time"],
+                end_time=p["end_time"],
+                value=p["value"],
+            )
+            for p in info["heatmap"]
+        ]
+
+    return AllLinksResponse(
+        video_id=info.get("id", ""),
+        title=info.get("title", ""),
+        alt_title=info.get("alt_title"),
+        webpage_url=info.get("webpage_url", ""),
+        original_url=info.get("original_url", ""),
+        extractor=info.get("extractor", ""),
+        channel=info.get("channel"),
+        channel_id=info.get("channel_id"),
+        channel_url=info.get("channel_url"),
+        channel_follower_count=info.get("channel_follower_count"),
+        uploader=info.get("uploader"),
+        artists=info.get("artists"),
+        creators=info.get("creators"),
+        description=info.get("description"),
+        categories=info.get("categories"),
+        tags=info.get("tags"),
+        album=info.get("album"),
+        track=info.get("track"),
+        view_count=info.get("view_count"),
+        like_count=info.get("like_count"),
+        comment_count=info.get("comment_count"),
+        age_limit=info.get("age_limit"),
+        availability=info.get("availability"),
+        duration=info.get("duration"),
+        duration_string=info.get("duration_string"),
+        upload_date=info.get("upload_date"),
+        release_date=info.get("release_date"),
+        release_year=info.get("release_year"),
+        timestamp=info.get("timestamp"),
+        thumbnail=info.get("thumbnail"),
+        is_live=info.get("is_live"),
+        was_live=info.get("was_live"),
+        live_status=info.get("live_status"),
+        media_type=info.get("media_type"),
+        playable_in_embed=info.get("playable_in_embed"),
+        heatmap=heatmap_points,
+        formats=formats,
+        thumbnails=thumbnails,
+        total_format_links=len(formats),
+        total_thumbnail_links=len(thumbnails),
+        total_links=len(formats) + len(thumbnails),
+    )
+
+
+@app.post("/alllinks", response_model=AllLinksResponse)
+async def alllinks(request: AllLinksRequest) -> AllLinksResponse:
+    """Extract every direct URL yt-dlp resolves for a video page.
+
+    Returns all format streams (video, audio, storyboard) and all thumbnail
+    variants, together with rich video metadata.
+
+    The `url` field of each `FormatLink` is a direct media URL you can play
+    or download. Pass any of them to `/proxy` to avoid CORS issues.
+    """
+    cmd = [_binary_path, "-J", "--no-playlist"]
+
+    tmp_cookies = None
+    try:
+        if os.path.isfile(COOKIES_FILE):
+            tmp = tempfile.NamedTemporaryFile(suffix=".txt", delete=False)
+            tmp_cookies = tmp.name
+            tmp.close()
+            shutil.copy2(COOKIES_FILE, tmp_cookies)
+            cmd += ["--cookies", tmp_cookies]
+
+        cmd += [str(request.url)]
+        loop = asyncio.get_running_loop()
+        info = await loop.run_in_executor(None, _fetch_formats_sync, cmd)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"yt-dlp failed: {e}")
+    finally:
+        if tmp_cookies:
+            os.unlink(tmp_cookies)
+
+    return _build_alllinks_response(info)
 
 
 if __name__ == "__main__":
