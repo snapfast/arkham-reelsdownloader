@@ -14,6 +14,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app.py download_ytdlp.py ./
+COPY models/ ./models/
 RUN python download_ytdlp.py
 
 ENV PORT=8080

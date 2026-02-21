@@ -5,7 +5,7 @@
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 UPLOAD_SCRIPT="$SCRIPT_DIR/cookies_upload.sh"
-INTERVAL=$((10 * 60))  # 600 seconds
+INTERVAL=$((20 * 60))  # 600 seconds
 
 if [ ! -f "$UPLOAD_SCRIPT" ]; then
     echo "Error: cookies_upload.sh not found at $UPLOAD_SCRIPT"
