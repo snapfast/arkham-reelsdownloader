@@ -5,7 +5,7 @@
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 UPLOAD_SCRIPT="$SCRIPT_DIR/cookies_upload.sh"
-INTERVAL=$((20 * 60))  # 600 seconds
+INTERVAL=$((30 * 60))  # 1800 seconds
 
 if [ ! -f "$UPLOAD_SCRIPT" ]; then
     echo "Error: cookies_upload.sh not found at $UPLOAD_SCRIPT"
@@ -19,6 +19,6 @@ while true; do
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] Running cookies_upload.sh..."
     bash "$UPLOAD_SCRIPT" && echo "[$(date '+%Y-%m-%d %H:%M:%S')] Done." \
                           || echo "[$(date '+%Y-%m-%d %H:%M:%S')] Upload failed (exit $?)."
-    echo "Next run in 10 minutes..."
+    echo "Next run in 30 minutes..."
     sleep "$INTERVAL"
 done
