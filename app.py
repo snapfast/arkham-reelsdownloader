@@ -355,11 +355,13 @@ _PROXY_HEADERS = {
 @app.get("/proxy")
 async def proxy(
     url: str = Query(..., description="Direct media URL to stream"),
+    filename: Optional[str] = Query(None, description="Suggested download filename (sets Content-Disposition)"),
     range: Optional[str] = Header(None),
 ):
     """Proxy a direct media URL through the server to avoid client-side CORS restrictions.
 
     Forwards Content-Length and range-request headers so clients can display download progress.
+    Pass `filename` to have the browser save the file with a specific name.
     """
     if not url.startswith(("http://", "https://")):
         raise HTTPException(status_code=400, detail="Invalid URL.")
@@ -378,6 +380,14 @@ async def proxy(
     for h in ("content-length", "accept-ranges", "content-range"):
         if h in upstream.headers:
             fwd_headers[h] = upstream.headers[h]
+
+    if filename:
+        # Sanitize: strip path separators, then encode non-ASCII chars for the
+        # RFC 5987 filename* parameter so unicode titles work in all browsers.
+        safe_name = filename.replace("/", "_").replace("\\", "_")
+        from urllib.parse import quote
+        encoded = quote(safe_name, safe=" ()-_.,")
+        fwd_headers["Content-Disposition"] = f'attachment; filename="{safe_name}"; filename*=UTF-8\'\'{encoded}'
 
     # Use the upstream content-type so audio streams are served with the correct MIME type.
     media_type = upstream.headers.get("content-type", "application/octet-stream").split(";")[0].strip()
