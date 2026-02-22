@@ -34,6 +34,7 @@ gcloud run deploy "$GCP_SERVICE" \
     --project "$GCP_PROJECT" \
     --port 8080 \
     --memory 512Mi \
+    --timeout 600 \
     --allow-unauthenticated
 
 echo ""
