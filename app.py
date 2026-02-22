@@ -30,9 +30,9 @@ import tempfile
 from typing import Dict, List, Optional
 
 import httpx
-from fastapi import FastAPI, Header, HTTPException, Query
+from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, HttpUrl
 
 from models.mp3 import MP3Request
@@ -75,6 +75,16 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    """Ensure CORS headers are present even on unhandled 500 errors."""
+    return JSONResponse(
+        status_code=500,
+        content={"detail": f"Internal server error: {exc}"},
+        headers={"Access-Control-Allow-Origin": "*"},
+    )
 
 
 @app.on_event("startup")
@@ -665,10 +675,11 @@ async def mp3(request: MP3Request) -> StreamingResponse:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-    except FileNotFoundError:
+    except Exception as e:
         if thumb_path:
             os.unlink(thumb_path)
-        raise HTTPException(status_code=500, detail="ffmpeg is not installed on this server.")
+        detail = "ffmpeg is not installed on this server." if isinstance(e, FileNotFoundError) else f"ffmpeg failed to start: {e}"
+        raise HTTPException(status_code=500, detail=detail)
 
     # 6. Build response headers
     from urllib.parse import quote
