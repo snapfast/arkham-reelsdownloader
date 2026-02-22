@@ -22,12 +22,20 @@ Usage:
 
 import asyncio
 import json
+import logging
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
 from typing import Dict, List, Optional
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s — %(message)s",
+    stream=sys.stdout,
+)
+logger = logging.getLogger("reels")
 
 import httpx
 from fastapi import FastAPI, Header, HTTPException, Query, Request
@@ -599,20 +607,31 @@ async def mp3(request: MP3Request) -> StreamingResponse:
     Embeds ID3v2 tags: title, artist, album, date, and cover art.
     No Content-Length is returned (chunked streaming from live transcoding).
     """
+    logger.info("START url=%r filename=%r", request.url, request.filename)
+
     # 1. Fetch full info JSON
     cmd = [_binary_path, "-j", "--no-playlist"]
     tmp_cookies = None
     try:
-        if os.path.isfile(COOKIES_FILE):
+        cookies_present = os.path.isfile(COOKIES_FILE)
+        logger.info("cookies_file_present=%s", cookies_present)
+        if cookies_present:
             tmp = tempfile.NamedTemporaryFile(suffix=".txt", delete=False)
             tmp_cookies = tmp.name
             tmp.close()
             shutil.copy2(COOKIES_FILE, tmp_cookies)
             cmd += ["--cookies", tmp_cookies]
         cmd += [str(request.url)]
+        logger.info("running yt-dlp: %s", " ".join(cmd))
         loop = asyncio.get_running_loop()
         info = await loop.run_in_executor(None, _fetch_formats_sync, cmd)
+        logger.info(
+            "yt-dlp ok — title=%r track=%r fulltitle=%r uploader=%r formats_count=%d",
+            info.get("title"), info.get("track"), info.get("fulltitle"),
+            info.get("uploader"), len(info.get("formats", [])),
+        )
     except Exception as e:
+        logger.error("yt-dlp failed: %s", e)
         raise HTTPException(status_code=502, detail=f"yt-dlp failed: {e}")
     finally:
         if tmp_cookies:
@@ -621,11 +640,14 @@ async def mp3(request: MP3Request) -> StreamingResponse:
     # 2. Pick best audio URL
     audio_url = _best_audio_url(info.get("formats", []))
     if not audio_url:
+        logger.error("no direct audio stream found for %r", request.url)
         raise HTTPException(status_code=502, detail="No direct audio stream found for this URL.")
+    logger.info("best_audio_url=%s...", audio_url[:80])
 
     # 3. Download best thumbnail to temp file (for album art embedding)
     thumb_path: Optional[str] = None
     thumb_url = _best_thumbnail_url(info.get("thumbnails", []))
+    logger.info("thumb_url=%r", thumb_url)
     if thumb_url:
         try:
             async with httpx.AsyncClient(follow_redirects=True, timeout=15) as client:
@@ -637,7 +659,11 @@ async def mp3(request: MP3Request) -> StreamingResponse:
                     thumb_path = tmp.name
                     tmp.write(resp.content)
                     tmp.close()
-        except Exception:
+                    logger.info("thumbnail downloaded: %s (%d bytes)", thumb_path, len(resp.content))
+                else:
+                    logger.warning("thumbnail fetch returned status=%d", resp.status_code)
+        except Exception as e:
+            logger.warning("thumbnail fetch error (non-fatal): %s", e)
             thumb_path = None  # album art is optional — don't fail the request
 
     # 4. Build ffmpeg command
@@ -662,6 +688,7 @@ async def mp3(request: MP3Request) -> StreamingResponse:
         "date":    (info.get("upload_date") or "")[:4],
         "comment": info.get("webpage_url") or "",
     }
+    logger.info("id3_meta=%s", meta)
     for key, value in meta.items():
         if value:
             ffmpeg_cmd += ["-metadata", f"{key}={value}"]
@@ -669,27 +696,31 @@ async def mp3(request: MP3Request) -> StreamingResponse:
     ffmpeg_cmd += ["-c:a", "libmp3lame", "-b:a", "192k", "-id3v2_version", "3", "-f", "mp3", "pipe:1"]
 
     # 5. Launch ffmpeg
+    logger.info("launching ffmpeg (thumb=%s)", "yes" if thumb_path else "no")
     try:
         proc = await asyncio.create_subprocess_exec(
             *ffmpeg_cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
+        logger.info("ffmpeg started pid=%d", proc.pid)
     except Exception as e:
         if thumb_path:
             os.unlink(thumb_path)
         detail = "ffmpeg is not installed on this server." if isinstance(e, FileNotFoundError) else f"ffmpeg failed to start: {e}"
+        logger.error("ffmpeg launch failed: %s", e)
         raise HTTPException(status_code=500, detail=detail)
 
     # 6. Build response headers
     from urllib.parse import quote
-    raw_name = request.filename or info.get("title") or "audio"
+    raw_name = request.filename or info.get("title") or info.get("track") or "audio"
     safe_name = raw_name.replace("/", "_").replace("\\", "_")
     if not safe_name.lower().endswith(".mp3"):
         safe_name += ".mp3"
     encoded = quote(safe_name, safe=" ()-_.,")
     # filename= must be latin-1 safe (HTTP header constraint); non-ASCII chars are replaced.
     ascii_name = safe_name.encode("ascii", errors="replace").decode("ascii").replace("?", "_")
+    logger.info("response filename=%r (ascii fallback=%r)", safe_name, ascii_name)
     fwd_headers: dict[str, str] = {
         "Content-Disposition": (
             f'attachment; filename="{ascii_name}"; filename*=UTF-8\'\'{encoded}'
@@ -698,16 +729,22 @@ async def mp3(request: MP3Request) -> StreamingResponse:
 
     # 7. Stream ffmpeg stdout to client
     async def _stream():
+        bytes_sent = 0
         try:
             while True:
                 chunk = await proc.stdout.read(65536)
                 if not chunk:
                     break
+                bytes_sent += len(chunk)
                 yield chunk
         finally:
             if proc.returncode is None:
                 proc.kill()
             await proc.wait()
+            stderr_out = await proc.stderr.read()
+            if stderr_out:
+                logger.warning("ffmpeg stderr: %s", stderr_out.decode(errors="replace"))
+            logger.info("DONE ffmpeg_exit=%d bytes_sent=%d", proc.returncode, bytes_sent)
             if thumb_path and os.path.exists(thumb_path):
                 os.unlink(thumb_path)
 
