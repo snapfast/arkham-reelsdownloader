@@ -666,7 +666,7 @@ async def mp3(request: MP3Request) -> StreamingResponse:
 
     # 4. Build ffmpeg command
     ffmpeg_cmd = [
-        "ffmpeg", "-hide_banner", "-loglevel", "error",
+        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
         "-i", audio_url,
     ]
     if thumb_path:
@@ -685,31 +685,70 @@ async def mp3(request: MP3Request) -> StreamingResponse:
         "album":   info.get("album") or info.get("channel") or "",
         "date":    (info.get("upload_date") or "")[:4],
         "comment": info.get("webpage_url") or "",
+        "genre":   "Dance",
     }
     logger.info("id3_meta=%s", meta)
     for key, value in meta.items():
         if value:
             ffmpeg_cmd += ["-metadata", f"{key}={value}"]
 
-    ffmpeg_cmd += ["-c:a", "libmp3lame", "-b:a", "192k", "-id3v2_version", "3", "-f", "mp3", "pipe:1"]
+    # 5. Create temp output file and finalize ffmpeg command
+    out_fd, out_path = tempfile.mkstemp(suffix=".mp3")
+    os.close(out_fd)
 
-    # 5. Launch ffmpeg
+    if thumb_path:
+        ffmpeg_cmd += [
+            "-c:a", "libmp3lame", "-b:a", "192k",
+            "-c:v", "mjpeg",
+            "-disposition:v", "attached_pic",
+            "-id3v2_version", "3",
+            "-f", "mp3", out_path,
+        ]
+    else:
+        ffmpeg_cmd += [
+            "-c:a", "libmp3lame", "-b:a", "192k",
+            "-id3v2_version", "3",
+            "-f", "mp3", out_path,
+        ]
+
+    # 6. Launch ffmpeg and wait for completion
     logger.info("launching ffmpeg (thumb=%s)", "yes" if thumb_path else "no")
     try:
         proc = await asyncio.create_subprocess_exec(
             *ffmpeg_cmd,
-            stdout=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.PIPE,
         )
         logger.info("ffmpeg started pid=%d", proc.pid)
     except Exception as e:
-        if thumb_path:
+        if thumb_path and os.path.exists(thumb_path):
             os.unlink(thumb_path)
+        if os.path.exists(out_path):
+            os.unlink(out_path)
         detail = "ffmpeg is not installed on this server." if isinstance(e, FileNotFoundError) else f"ffmpeg failed to start: {e}"
         logger.error("ffmpeg launch failed: %s", e)
         raise HTTPException(status_code=500, detail=detail)
 
-    # 6. Build response headers
+    _, stderr_bytes = await proc.communicate()
+
+    logger.info("ffmpeg return_code=%d", proc.returncode)
+    if stderr_bytes:
+        logger.warning("ffmpeg stderr: %s", stderr_bytes.decode(errors="replace"))
+
+    file_size = os.path.getsize(out_path)
+    logger.info("ffmpeg output file size: %d bytes", file_size)
+
+    if proc.returncode != 0:
+        if thumb_path and os.path.exists(thumb_path):
+            os.unlink(thumb_path)
+        if os.path.exists(out_path):
+            os.unlink(out_path)
+        raise HTTPException(
+            status_code=500,
+            detail=f"ffmpeg failed (rc={proc.returncode}): {stderr_bytes.decode(errors='replace')[:500]}"
+        )
+
+    # 7. Build response headers
     from urllib.parse import quote
     raw_name = request.filename or info.get("title") or info.get("track") or "audio"
     safe_name = raw_name.replace("/", "_").replace("\\", "_")
@@ -722,32 +761,28 @@ async def mp3(request: MP3Request) -> StreamingResponse:
     fwd_headers: dict[str, str] = {
         "Content-Disposition": (
             f'attachment; filename="{ascii_name}"; filename*=UTF-8\'\'{encoded}'
-        )
+        ),
+        "Content-Length": str(file_size),
     }
 
-    # 7. Stream ffmpeg stdout to client
-    async def _stream():
-        bytes_sent = 0
+    # 8. Stream temp file to client
+    async def _stream_file():
         try:
-            while True:
-                chunk = await proc.stdout.read(65536)
-                if not chunk:
-                    break
-                bytes_sent += len(chunk)
-                yield chunk
+            with open(out_path, "rb") as f:
+                while True:
+                    chunk = f.read(65536)
+                    if not chunk:
+                        break
+                    yield chunk
         finally:
-            if proc.returncode is None:
-                proc.kill()
-            await proc.wait()
-            stderr_out = await proc.stderr.read()
-            if stderr_out:
-                logger.warning("ffmpeg stderr: %s", stderr_out.decode(errors="replace"))
-            logger.info("DONE ffmpeg_exit=%d bytes_sent=%d", proc.returncode, bytes_sent)
             if thumb_path and os.path.exists(thumb_path):
                 os.unlink(thumb_path)
+            if os.path.exists(out_path):
+                os.unlink(out_path)
 
+    logger.info("DONE streaming file size=%d", file_size)
     return StreamingResponse(
-        _stream(),
+        _stream_file(),
         status_code=200,
         media_type="audio/mpeg",
         headers=fwd_headers,
