@@ -35,6 +35,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, HttpUrl
 
+from models.mp3 import MP3Request
 from models.alllinks import (
     AllLinksRequest,
     AllLinksResponse,
@@ -551,6 +552,158 @@ async def alllinks(request: AllLinksRequest) -> AllLinksResponse:
             os.unlink(tmp_cookies)
 
     return _build_alllinks_response(info)
+
+
+def _best_audio_url(formats: list[dict]) -> Optional[str]:
+    """Return the highest-bitrate direct (non-HLS) audio-only URL from a yt-dlp format list."""
+    audio = [
+        f for f in formats
+        if f.get("vcodec") == "none"
+        and f.get("acodec") not in ("none", None, "")
+        and f.get("url", "").startswith(("http://", "https://"))
+        and "m3u8" not in f.get("protocol", "")
+    ]
+    if not audio:
+        return None
+    audio.sort(key=lambda f: f.get("abr") or 0, reverse=True)
+    return audio[0]["url"]
+
+
+def _best_thumbnail_url(thumbnails: list[dict]) -> Optional[str]:
+    """Return the highest-resolution thumbnail URL."""
+    valid = [t for t in thumbnails if t.get("url", "").startswith(("http://", "https://"))]
+    if not valid:
+        return None
+    valid.sort(
+        key=lambda t: (t.get("width") or 0, t.get("height") or 0, t.get("preference") or 0),
+        reverse=True,
+    )
+    return valid[0]["url"]
+
+
+@app.post("/mp3")
+async def mp3(request: MP3Request) -> StreamingResponse:
+    """Resolve a video URL's audio and stream it as an MP3 with embedded metadata and album art.
+
+    Always uses the highest-quality audio stream available.
+    Embeds ID3v2 tags: title, artist, album, date, and cover art.
+    No Content-Length is returned (chunked streaming from live transcoding).
+    """
+    # 1. Fetch full info JSON
+    cmd = [_binary_path, "-j", "--no-playlist"]
+    tmp_cookies = None
+    try:
+        if os.path.isfile(COOKIES_FILE):
+            tmp = tempfile.NamedTemporaryFile(suffix=".txt", delete=False)
+            tmp_cookies = tmp.name
+            tmp.close()
+            shutil.copy2(COOKIES_FILE, tmp_cookies)
+            cmd += ["--cookies", tmp_cookies]
+        cmd += [str(request.url)]
+        loop = asyncio.get_running_loop()
+        info = await loop.run_in_executor(None, _fetch_formats_sync, cmd)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"yt-dlp failed: {e}")
+    finally:
+        if tmp_cookies:
+            os.unlink(tmp_cookies)
+
+    # 2. Pick best audio URL
+    audio_url = _best_audio_url(info.get("formats", []))
+    if not audio_url:
+        raise HTTPException(status_code=502, detail="No direct audio stream found for this URL.")
+
+    # 3. Download best thumbnail to temp file (for album art embedding)
+    thumb_path: Optional[str] = None
+    thumb_url = _best_thumbnail_url(info.get("thumbnails", []))
+    if thumb_url:
+        try:
+            async with httpx.AsyncClient(follow_redirects=True, timeout=15) as client:
+                resp = await client.get(thumb_url, headers=_PROXY_HEADERS)
+                if resp.status_code == 200:
+                    ct = resp.headers.get("content-type", "")
+                    suffix = ".jpg" if ("jpeg" in ct or "jpg" in thumb_url) else ".png"
+                    tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
+                    thumb_path = tmp.name
+                    tmp.write(resp.content)
+                    tmp.close()
+        except Exception:
+            thumb_path = None  # album art is optional — don't fail the request
+
+    # 4. Build ffmpeg command
+    ffmpeg_cmd = [
+        "ffmpeg", "-hide_banner", "-loglevel", "error",
+        "-i", audio_url,
+    ]
+    if thumb_path:
+        ffmpeg_cmd += [
+            "-i", thumb_path,
+            "-map", "0:a", "-map", "1:0",
+            "-metadata:s:v", "title=Album cover",
+            "-metadata:s:v", "comment=Cover (front)",
+        ]
+    else:
+        ffmpeg_cmd += ["-map", "0:a"]
+
+    meta = {
+        "title":   info.get("title") or info.get("track") or "",
+        "artist":  (info.get("artists") or [None])[0] or info.get("uploader") or info.get("channel") or "",
+        "album":   info.get("album") or info.get("channel") or "",
+        "date":    (info.get("upload_date") or "")[:4],
+        "comment": info.get("webpage_url") or "",
+    }
+    for key, value in meta.items():
+        if value:
+            ffmpeg_cmd += ["-metadata", f"{key}={value}"]
+
+    ffmpeg_cmd += ["-c:a", "libmp3lame", "-b:a", "192k", "-id3v2_version", "3", "-f", "mp3", "pipe:1"]
+
+    # 5. Launch ffmpeg
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *ffmpeg_cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    except FileNotFoundError:
+        if thumb_path:
+            os.unlink(thumb_path)
+        raise HTTPException(status_code=500, detail="ffmpeg is not installed on this server.")
+
+    # 6. Build response headers
+    from urllib.parse import quote
+    raw_name = request.filename or info.get("title") or "audio"
+    safe_name = raw_name.replace("/", "_").replace("\\", "_")
+    if not safe_name.lower().endswith(".mp3"):
+        safe_name += ".mp3"
+    encoded = quote(safe_name, safe=" ()-_.,")
+    fwd_headers: dict[str, str] = {
+        "Content-Disposition": (
+            f'attachment; filename="{safe_name}"; filename*=UTF-8\'\'{encoded}'
+        )
+    }
+
+    # 7. Stream ffmpeg stdout to client
+    async def _stream():
+        try:
+            while True:
+                chunk = await proc.stdout.read(65536)
+                if not chunk:
+                    break
+                yield chunk
+        finally:
+            if proc.returncode is None:
+                proc.kill()
+            await proc.wait()
+            if thumb_path and os.path.exists(thumb_path):
+                os.unlink(thumb_path)
+
+    return StreamingResponse(
+        _stream(),
+        status_code=200,
+        media_type="audio/mpeg",
+        headers=fwd_headers,
+    )
 
 
 if __name__ == "__main__":
