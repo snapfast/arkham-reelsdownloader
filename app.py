@@ -82,6 +82,7 @@ app.add_middleware(
     allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["Content-Disposition", "Content-Length", "Accept-Ranges", "Content-Range"],
 )
 
 
@@ -196,12 +197,10 @@ def _run_yt_dlp_sync(cmd: list[str]) -> list[str]:
     try:
         output = subprocess.check_output(cmd, text=True, stderr=subprocess.STDOUT)
     except subprocess.CalledProcessError as e:
-        print(f"[yt-dlp] Command failed: {' '.join(cmd)}", file=sys.stderr)
-        if e.output:
-            print(e.output, file=sys.stderr)
         msg = "\n".join(
             line.strip() for line in (e.output or "").splitlines() if line.strip()
         ).strip() or f"yt-dlp failed with exit code {e.returncode}"
+        logger.error("yt-dlp command failed: %s\n%s", " ".join(cmd), msg)
         raise RuntimeError(msg) from e
 
     return [
@@ -265,7 +264,7 @@ async def resolve(request: ResolveRequest) -> ResolveResponse:
         raise HTTPException(status_code=502, detail=f"yt-dlp failed: {e}")
 
     if media_url is None:
-        print(f"[yt-dlp/resolve] No media URL returned for {request.url}", file=sys.stderr)
+        logger.error("yt-dlp returned no media URL for %r", request.url)
         raise HTTPException(status_code=502, detail="yt-dlp did not return a direct media URL.")
 
     return ResolveResponse(input_url=request.url, quality=request.quality, media_url=media_url)
@@ -276,7 +275,7 @@ def _fetch_formats_sync(cmd: list[str]) -> dict:
         return json.loads(subprocess.check_output(cmd, text=True, stderr=subprocess.PIPE))
     except subprocess.CalledProcessError as e:
         msg = e.stderr.strip() or f"yt-dlp exited with code {e.returncode}"
-        print(f"[yt-dlp/formats] Command failed: {' '.join(cmd)}\n{msg}", file=sys.stderr)
+        logger.error("yt-dlp formats command failed: %s\n%s", " ".join(cmd), msg)
         raise RuntimeError(msg) from e
 
 
@@ -401,12 +400,11 @@ async def proxy(
             fwd_headers[h] = upstream.headers[h]
 
     if filename:
-        # Sanitize: strip path separators, then encode non-ASCII chars for the
-        # RFC 5987 filename* parameter so unicode titles work in all browsers.
-        safe_name = filename.replace("/", "_").replace("\\", "_")
         from urllib.parse import quote
+        safe_name = filename.replace("/", "_").replace("\\", "_")
         encoded = quote(safe_name, safe=" ()-_.,")
-        fwd_headers["Content-Disposition"] = f'attachment; filename="{safe_name}"; filename*=UTF-8\'\'{encoded}'
+        ascii_name = safe_name.encode("ascii", errors="replace").decode("ascii").replace("?", "_")
+        fwd_headers["Content-Disposition"] = f'attachment; filename="{ascii_name}"; filename*=UTF-8\'\'{encoded}'
 
     # Use the upstream content-type so audio streams are served with the correct MIME type.
     media_type = upstream.headers.get("content-type", "application/octet-stream").split(";")[0].strip()
