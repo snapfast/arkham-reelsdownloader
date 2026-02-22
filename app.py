@@ -688,9 +688,11 @@ async def mp3(request: MP3Request) -> StreamingResponse:
     if not safe_name.lower().endswith(".mp3"):
         safe_name += ".mp3"
     encoded = quote(safe_name, safe=" ()-_.,")
+    # filename= must be latin-1 safe (HTTP header constraint); non-ASCII chars are replaced.
+    ascii_name = safe_name.encode("ascii", errors="replace").decode("ascii").replace("?", "_")
     fwd_headers: dict[str, str] = {
         "Content-Disposition": (
-            f'attachment; filename="{safe_name}"; filename*=UTF-8\'\'{encoded}'
+            f'attachment; filename="{ascii_name}"; filename*=UTF-8\'\'{encoded}'
         )
     }
 
